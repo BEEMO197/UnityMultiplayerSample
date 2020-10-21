@@ -5,15 +5,22 @@ using NetworkMessages;
 using NetworkObjects;
 using System;
 using System.Text;
+using System.Collections.Generic;
+using System.Linq;
+using System.Collections;
 
 public class NetworkClient : MonoBehaviour
 {
+    public float updateTime = 1.0f / 30.0f;
     public NetworkDriver m_Driver;
     public NetworkConnection m_Connection;
     public string serverIP;
     public ushort serverPort;
 
-    
+    public string clientID;
+    public List<NetworkObjects.NetworkPlayer> playerList = new List<NetworkObjects.NetworkPlayer>();
+    public GameObject cubeRef;
+
     void Start ()
     {
         m_Driver = NetworkDriver.Create();
@@ -22,53 +29,141 @@ public class NetworkClient : MonoBehaviour
         m_Connection = m_Driver.Connect(endpoint);
     }
     
-    void SendToServer(string message){
+    void SendToServer(string message)
+    {
         var writer = m_Driver.BeginSend(m_Connection);
         NativeArray<byte> bytes = new NativeArray<byte>(Encoding.ASCII.GetBytes(message),Allocator.Temp);
         writer.WriteBytes(bytes);
         m_Driver.EndSend(writer);
     }
 
-    void OnConnect(){
-        Debug.Log("We are now connected to the server");
+    void OnConnect()
+    {
+        //PlayerUpdateMsg pm = new PlayerUpdateMsg();
+        //pm.player.id = clientID;
+        //SendToServer(JsonUtility.ToJson(pm));
 
-        //// Example to send a handshake message:
-        // HandshakeMsg m = new HandshakeMsg();
-        // m.player.id = m_Connection.InternalId.ToString();
-        // SendToServer(JsonUtility.ToJson(m));
+        StartCoroutine(SendPlayerInformation());
     }
 
-    void OnData(DataStreamReader stream){
+    IEnumerator SendPlayerInformation()
+    {
+        while (true)
+        {
+            PlayerUpdateMsg pum = new PlayerUpdateMsg();
+
+            foreach (NetworkObjects.NetworkPlayer player in playerList)
+            {
+                if (player.id == clientID)
+                {
+                    pum.player.id = clientID;
+                    pum.player.cube = player.cube;
+                    pum.player.cubeColor = player.cubeColor;
+                    pum.player.cubPos = player.cubPos;
+                    pum.player.cubRot = player.cubRot;
+
+                    SendToServer(JsonUtility.ToJson(pum));
+                }
+            }
+
+            yield return new WaitForSeconds(updateTime);
+        }
+    }
+
+    void OnData(DataStreamReader stream)
+    {
         NativeArray<byte> bytes = new NativeArray<byte>(stream.Length,Allocator.Temp);
         stream.ReadBytes(bytes);
         string recMsg = Encoding.ASCII.GetString(bytes.ToArray());
         NetworkHeader header = JsonUtility.FromJson<NetworkHeader>(recMsg);
 
+        Debug.Log("Got this: " + header.cmd);
+
         switch(header.cmd){
             case Commands.HANDSHAKE:
-            HandshakeMsg hsMsg = JsonUtility.FromJson<HandshakeMsg>(recMsg);
-            Debug.Log("Handshake message received!");
-            break;
+                HandshakeMsg hsMsg = JsonUtility.FromJson<HandshakeMsg>(recMsg);
+                Debug.Log("Handshake message received!");
+                clientID = hsMsg.player.id;
+                break;
+
             case Commands.PLAYER_UPDATE:
-            PlayerUpdateMsg puMsg = JsonUtility.FromJson<PlayerUpdateMsg>(recMsg);
-            Debug.Log("Player update message received!");
-            break;
+                PlayerUpdateMsg puMsg = JsonUtility.FromJson<PlayerUpdateMsg>(recMsg);
+                Debug.Log("Player update message received!");
+                break;
+
+            case Commands.PLAYER_JOINED:
+                PlayerJoinMessage pjMsg = JsonUtility.FromJson<PlayerJoinMessage>(recMsg);
+                Debug.Log("Player join message received!");
+                pjMsg.player.cube = Instantiate(cubeRef);
+                pjMsg.player.cube.GetComponent<Renderer>().material.SetColor("_Color", pjMsg.player.cubeColor);
+
+                if(pjMsg.player.id == clientID)
+                {
+                    pjMsg.player.cube.AddComponent<PlayerController>();
+                    pjMsg.player.cube.GetComponent<PlayerController>().playerRef = pjMsg.player;
+                }
+
+                playerList.Add(pjMsg.player);
+
+                break;
+
             case Commands.SERVER_UPDATE:
-            ServerUpdateMsg suMsg = JsonUtility.FromJson<ServerUpdateMsg>(recMsg);
-            Debug.Log("Server update message received!");
-            break;
+                ServerUpdateMsg suMsg = JsonUtility.FromJson<ServerUpdateMsg>(recMsg);
+                Debug.Log("Server update message received!");
+                foreach(NetworkObjects.NetworkPlayer clientPlayer in playerList)
+                {
+                    if (clientPlayer.id == clientID)
+                    {
+                    }
+                    else
+                    {
+                        foreach (NetworkObjects.NetworkPlayer serverPlayer in suMsg.players)
+                        {
+                            if (serverPlayer.id == clientPlayer.id)
+                            {
+                                clientPlayer.cube.transform.position = serverPlayer.cubPos;
+                            }
+                            else
+                            {
+
+                            }
+                        }
+                    }
+                }
+                break;
+            case Commands.PLAYER_LEFT:
+                PlayerLeaveMsg plMsg = JsonUtility.FromJson<PlayerLeaveMsg>(recMsg);
+                Debug.Log("Player Leave message received!");
+                KillPlayer(plMsg.player);
+                OnDisconnect();
+
+                break;
             default:
-            Debug.Log("Unrecognized message received!");
-            break;
+                Debug.Log("Unrecognized message received!");
+                break;
+        }
+    }
+    
+    void KillPlayer(NetworkObjects.NetworkPlayer leavingPlayer)
+    {
+        foreach(NetworkObjects.NetworkPlayer player in playerList)
+        {
+            if(player.id == leavingPlayer.id)
+            {
+                Destroy(player.cube);
+                playerList.Remove(player);
+            }
         }
     }
 
-    void Disconnect(){
+    void Disconnect()
+    {
         m_Connection.Disconnect(m_Driver);
         m_Connection = default(NetworkConnection);
     }
 
-    void OnDisconnect(){
+    void OnDisconnect()
+    {
         Debug.Log("Client got disconnected from server");
         m_Connection = default(NetworkConnection);
     }
